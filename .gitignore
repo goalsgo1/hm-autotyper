@@ -1,0 +1,21 @@
+# 빌드 결과물
+dist/
+build/
+*.spec
+*.zip
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller 임시 파일
+version_info.txt
+uac.manifest
+
+# 배포용 문서 (package_release.py가 ZIP에 포함)
+docs/
+
+# OS 임시 파일
+Thumbs.db
+.DS_Store

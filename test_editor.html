@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>복사/붙여넣기 차단 에디터 - AutoTyper 테스트용</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+    background: #f0f2f5;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 30px 20px;
+    color: #333;
+  }
+
+  .header {
+    text-align: center;
+    margin-bottom: 24px;
+  }
+  .header h1 {
+    font-size: 22px;
+    color: #2c3e50;
+    margin-bottom: 6px;
+  }
+  .header p {
+    font-size: 13px;
+    color: #7f8c8d;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 860px;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 2px 16px rgba(0,0,0,0.08);
+    overflow: hidden;
+  }
+
+  /* 블로그 스타일 툴바 */
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 16px;
+    background: #fafbfc;
+    border-bottom: 1px solid #e1e4e8;
+    flex-wrap: wrap;
+  }
+  .toolbar button {
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 5px 10px;
+    font-size: 13px;
+    cursor: pointer;
+    color: #555;
+    transition: all 0.15s;
+  }
+  .toolbar button:hover {
+    background: #e8ecf0;
+    border-color: #d0d5da;
+  }
+  .toolbar .sep {
+    width: 1px;
+    height: 24px;
+    background: #d0d5da;
+    margin: 0 6px;
+  }
+
+  /* 에디터 영역 */
+  .editor {
+    min-height: 480px;
+    padding: 24px 28px;
+    font-size: 16px;
+    line-height: 1.8;
+    outline: none;
+    color: #2c3e50;
+    overflow-y: auto;
+    max-height: 70vh;
+  }
+  .editor:empty::before {
+    content: "여기에 직접 타이핑하세요... (붙여넣기 차단됨)";
+    color: #bdc3c7;
+    pointer-events: none;
+  }
+
+  /* 하단 상태바 */
+  .statusbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 16px;
+    background: #fafbfc;
+    border-top: 1px solid #e1e4e8;
+    font-size: 12px;
+    color: #7f8c8d;
+  }
+
+  /* 차단 알림 토스트 */
+  .toast {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: #e74c3c;
+    color: #fff;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    box-shadow: 0 4px 12px rgba(231,76,60,0.3);
+    transform: translateX(120%);
+    transition: transform 0.3s ease;
+    z-index: 9999;
+  }
+  .toast.show {
+    transform: translateX(0);
+  }
+
+  /* 설정 패널 */
+  .settings {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+    width: 100%;
+    max-width: 860px;
+  }
+  .settings label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #555;
+    cursor: pointer;
+    padding: 6px 12px;
+    background: #fff;
+    border-radius: 6px;
+    border: 1px solid #ddd;
+    transition: all 0.15s;
+    user-select: none;
+  }
+  .settings label:hover {
+    border-color: #3498db;
+  }
+  .settings label.active {
+    background: #3498db;
+    color: #fff;
+    border-color: #3498db;
+  }
+  .settings input[type="checkbox"] { display: none; }
+
+  /* 로그 영역 */
+  .log-panel {
+    width: 100%;
+    max-width: 860px;
+    margin-top: 16px;
+    background: #2c3e50;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .log-panel .log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 16px;
+    background: #34495e;
+    color: #ecf0f1;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .log-panel .log-header button {
+    background: none;
+    border: none;
+    color: #95a5a6;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .log-panel .log-header button:hover { color: #ecf0f1; }
+  #log {
+    padding: 12px 16px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+    color: #ecf0f1;
+    max-height: 180px;
+    overflow-y: auto;
+    line-height: 1.6;
+  }
+  .log-block { color: #e74c3c; }
+  .log-allow { color: #2ecc71; }
+  .log-info  { color: #f39c12; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>복사/붙여넣기 차단 에디터</h1>
+  <p>블로그·시험 사이트처럼 붙여넣기를 차단합니다 — HM AutoTyper 테스트용</p>
+</div>
+
+<!-- 차단 설정 -->
+<div class="settings" id="settings">
+  <label class="active"><input type="checkbox" data-block="paste" checked>붙여넣기 차단</label>
+  <label class="active"><input type="checkbox" data-block="copy" checked>복사 차단</label>
+  <label class="active"><input type="checkbox" data-block="cut" checked>잘라내기 차단</label>
+  <label><input type="checkbox" data-block="dragdrop">드래그&드롭 차단</label>
+  <label><input type="checkbox" data-block="rightclick">우클릭 차단</label>
+  <label><input type="checkbox" data-block="selectall">전체선택 차단</label>
+</div>
+
+<!-- 에디터 -->
+<div class="container">
+  <div class="toolbar">
+    <button onclick="execCmd('bold')"><b>B</b></button>
+    <button onclick="execCmd('italic')"><i>I</i></button>
+    <button onclick="execCmd('underline')"><u>U</u></button>
+    <div class="sep"></div>
+    <button onclick="execCmd('insertUnorderedList')">• 목록</button>
+    <button onclick="execCmd('insertOrderedList')">1. 목록</button>
+    <div class="sep"></div>
+    <button onclick="execCmd('justifyLeft')">왼쪽</button>
+    <button onclick="execCmd('justifyCenter')">가운데</button>
+    <button onclick="execCmd('justifyRight')">오른쪽</button>
+    <div class="sep"></div>
+    <button onclick="clearEditor()">전체 지우기</button>
+  </div>
+  <div class="editor" id="editor" contenteditable="true" spellcheck="false"></div>
+  <div class="statusbar">
+    <span id="charCount">0자</span>
+    <span id="blockStatus">붙여넣기 차단 ON</span>
+  </div>
+</div>
+
+<!-- 차단 토스트 -->
+<div class="toast" id="toast"></div>
+
+<!-- 이벤트 로그 -->
+<div class="log-panel">
+  <div class="log-header">
+    <span>이벤트 로그</span>
+    <button onclick="document.getElementById('log').innerHTML=''">지우기</button>
+  </div>
+  <div id="log"></div>
+</div>
+
+<script>
+const editor = document.getElementById('editor');
+const toast  = document.getElementById('toast');
+const log    = document.getElementById('log');
+const charCountEl  = document.getElementById('charCount');
+const blockStatusEl = document.getElementById('blockStatus');
+
+// ── 차단 상태 ──
+const blockState = {
+  paste: true, copy: true, cut: true,
+  dragdrop: false, rightclick: false, selectall: false
+};
+
+// ── 설정 체크박스 연결 ──
+document.querySelectorAll('#settings input[type="checkbox"]').forEach(cb => {
+  cb.addEventListener('change', () => {
+    const key = cb.dataset.block;
+    blockState[key] = cb.checked;
+    cb.parentElement.classList.toggle('active', cb.checked);
+    updateStatusText();
+    addLog('info', `${key} 차단: ${cb.checked ? 'ON' : 'OFF'}`);
+  });
+});
+
+function updateStatusText() {
+  const active = Object.entries(blockState).filter(([,v]) => v).map(([k]) => k);
+  blockStatusEl.textContent = active.length
+    ? `차단 중: ${active.join(', ')}`
+    : '차단 없음 (모두 허용)';
+}
+
+// ── 토스트 알림 ──
+let toastTimer = null;
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 2000);
+}
+
+// ── 로그 ──
+function addLog(type, msg) {
+  const time = new Date().toLocaleTimeString('ko-KR');
+  const cls = type === 'block' ? 'log-block' : type === 'allow' ? 'log-allow' : 'log-info';
+  log.innerHTML += `<div class="${cls}">[${time}] ${msg}</div>`;
+  log.scrollTop = log.scrollHeight;
+}
+
+// ── 붙여넣기 차단 ──
+editor.addEventListener('paste', e => {
+  if (blockState.paste) {
+    e.preventDefault();
+    e.stopPropagation();
+    const text = (e.clipboardData || window.clipboardData).getData('text');
+    const preview = text.length > 30 ? text.substring(0, 30) + '...' : text;
+    showToast('붙여넣기가 차단되었습니다!');
+    addLog('block', `붙여넣기 차단됨 (${text.length}자): "${preview}"`);
+  } else {
+    addLog('allow', '붙여넣기 허용됨');
+  }
+});
+
+// ── 복사 차단 ──
+editor.addEventListener('copy', e => {
+  if (blockState.copy) {
+    e.preventDefault();
+    e.stopPropagation();
+    showToast('복사가 차단되었습니다!');
+    addLog('block', '복사 차단됨');
+  } else {
+    addLog('allow', '복사 허용됨');
+  }
+});
+
+// ── 잘라내기 차단 ──
+editor.addEventListener('cut', e => {
+  if (blockState.cut) {
+    e.preventDefault();
+    e.stopPropagation();
+    showToast('잘라내기가 차단되었습니다!');
+    addLog('block', '잘라내기 차단됨');
+  } else {
+    addLog('allow', '잘라내기 허용됨');
+  }
+});
+
+// ── 드래그&드롭 차단 ──
+editor.addEventListener('drop', e => {
+  if (blockState.dragdrop) {
+    e.preventDefault();
+    e.stopPropagation();
+    showToast('드래그&드롭이 차단되었습니다!');
+    addLog('block', '드래그&드롭 차단됨');
+  }
+});
+editor.addEventListener('dragover', e => {
+  if (blockState.dragdrop) e.preventDefault();
+});
+
+// ── 우클릭 차단 ──
+editor.addEventListener('contextmenu', e => {
+  if (blockState.rightclick) {
+    e.preventDefault();
+    showToast('우클릭이 차단되었습니다!');
+    addLog('block', '우클릭 차단됨');
+  }
+});
+
+// ── Ctrl+A 전체선택 차단 ──
+editor.addEventListener('keydown', e => {
+  if (blockState.selectall && e.ctrlKey && e.key === 'a') {
+    e.preventDefault();
+    showToast('전체선택(Ctrl+A)이 차단되었습니다!');
+    addLog('block', '전체선택 차단됨');
+  }
+  // Ctrl+V 도 추가 차단 (일부 브라우저에서 paste 이벤트가 안 잡힐 수 있음)
+  if (blockState.paste && e.ctrlKey && e.key === 'v') {
+    e.preventDefault();
+    showToast('붙여넣기가 차단되었습니다!');
+    addLog('block', '붙여넣기(Ctrl+V) 차단됨');
+  }
+  // Ctrl+C 추가 차단
+  if (blockState.copy && e.ctrlKey && e.key === 'c') {
+    e.preventDefault();
+    showToast('복사가 차단되었습니다!');
+    addLog('block', '복사(Ctrl+C) 차단됨');
+  }
+  // Ctrl+X 추가 차단
+  if (blockState.cut && e.ctrlKey && e.key === 'x') {
+    e.preventDefault();
+    showToast('잘라내기가 차단되었습니다!');
+    addLog('block', '잘라내기(Ctrl+X) 차단됨');
+  }
+});
+
+// ── 글자 수 카운트 ──
+editor.addEventListener('input', () => {
+  const text = editor.innerText || '';
+  charCountEl.textContent = `${text.replace(/\n$/, '').length}자`;
+});
+
+// ── 툴바 명령 ──
+function execCmd(cmd) {
+  document.execCommand(cmd, false, null);
+  editor.focus();
+}
+function clearEditor() {
+  editor.innerHTML = '';
+  charCountEl.textContent = '0자';
+  addLog('info', '에디터 초기화');
+}
+
+// ── 초기 로그 ──
+addLog('info', '에디터 준비 완료 — HM AutoTyper로 테스트하세요!');
+addLog('info', '상단 체크박스로 차단 항목을 ON/OFF 할 수 있습니다.');
+updateStatusText();
+</script>
+</body>
+</html>
