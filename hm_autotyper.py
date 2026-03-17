@@ -54,6 +54,51 @@ if IS_WINDOWS:
     import ctypes
     import ctypes.wintypes
 
+    # ─── SendInput 유니코드 입력 구조체 ───
+    INPUT_KEYBOARD = 1
+    KEYEVENTF_UNICODE = 0x0004
+    KEYEVENTF_KEYUP = 0x0002
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", ctypes.c_ushort),
+            ("wScan", ctypes.c_ushort),
+            ("dwFlags", ctypes.c_ulong),
+            ("time", ctypes.c_ulong),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long),
+                     ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
+                     ("time", ctypes.c_ulong), ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+
+    class HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [("uMsg", ctypes.c_ulong), ("wParamL", ctypes.c_ushort),
+                     ("wParamH", ctypes.c_ushort)]
+
+    class _INPUT_UNION(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_ulong), ("union", _INPUT_UNION)]
+
+    def send_unicode_char(char):
+        """SendInput으로 유니코드 문자를 직접 전송 (IME 완전 우회)"""
+        code = ord(char)
+        inputs = (INPUT * 2)()
+        # Key down
+        inputs[0].type = INPUT_KEYBOARD
+        inputs[0].union.ki.wVk = 0
+        inputs[0].union.ki.wScan = code
+        inputs[0].union.ki.dwFlags = KEYEVENTF_UNICODE
+        # Key up
+        inputs[1].type = INPUT_KEYBOARD
+        inputs[1].union.ki.wVk = 0
+        inputs[1].union.ki.wScan = code
+        inputs[1].union.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+        ctypes.windll.user32.SendInput(2, ctypes.byref(inputs), ctypes.sizeof(INPUT))
+
 # ─── Try customtkinter, fallback to tkinter ───
 try:
     import customtkinter as ctk
@@ -191,10 +236,18 @@ SHIFT_CHARS = {
 # ═══════════════════════════════════════════════════════════════
 
 class IMEController:
-    """Windows IME 한/영 상태를 감지하고 전환하는 컨트롤러"""
+    """Windows IME 한/영 상태를 감지하고 전환하는 컨트롤러
 
-    VK_HANGUL = 0x15  # 한/영 전환 가상 키코드
-    VK_PROCESSKEY = 0xE5
+    전환 전략:
+      1순위: WM_IME_CONTROL 메시지 — IME 윈도우에 직접 모드 설정 (빠르고 안정적)
+      2순위: VK_HANGUL keybd_event — 한/영 키 시뮬레이션 (폴백)
+    """
+
+    VK_HANGUL = 0x15
+    WM_IME_CONTROL = 0x0283
+    IMC_GETCONVERSIONMODE = 0x0001
+    IMC_SETCONVERSIONMODE = 0x0002
+    IME_CMODE_HANGEUL = 0x01
 
     def __init__(self):
         if not IS_WINDOWS:
@@ -213,18 +266,21 @@ class IMEController:
             return None
         return self.user32.GetForegroundWindow()
 
+    def _get_ime_hwnd(self):
+        """현재 포커스 창의 IME 윈도우 핸들"""
+        hwnd = self.user32.GetForegroundWindow()
+        return self.imm32.ImmGetDefaultIMEWnd(hwnd)
+
     def is_hangul_mode(self):
         """현재 IME가 한글 모드인지 확인"""
         if not self.available:
             return False
         try:
-            hwnd = self.user32.GetForegroundWindow()
-            # IME 윈도우 핸들 가져오기
-            ime_hwnd = self.imm32.ImmGetDefaultIMEWnd(hwnd)
+            ime_hwnd = self._get_ime_hwnd()
             if ime_hwnd:
-                # WM_IME_CONTROL (0x0283), IMC_GETCONVERSIONMODE (0x0001)
-                result = self.user32.SendMessageW(ime_hwnd, 0x0283, 0x0001, 0)
-                return bool(result & 1)  # 비트 0이 1이면 한글 모드
+                result = self.user32.SendMessageW(
+                    ime_hwnd, self.WM_IME_CONTROL, self.IMC_GETCONVERSIONMODE, 0)
+                return bool(result & self.IME_CMODE_HANGEUL)
             return False
         except Exception:
             return False
@@ -233,28 +289,38 @@ class IMEController:
         """한글 모드 설정/해제. enable=True이면 한글, False이면 영문"""
         if not self.available:
             return
-        current = self.is_hangul_mode()
-        if current != enable:
-            self._toggle_hangul()
-            # 전환 확인 (최대 3회 재시도)
-            for _ in range(3):
-                if self.is_hangul_mode() == enable:
-                    break
-                time.sleep(0.05)
-                self._toggle_hangul()
-
-    def _toggle_hangul(self):
-        """한/영 키를 시뮬레이션하여 IME 모드 전환"""
-        if not self.available:
+        if self.is_hangul_mode() == enable:
             return
+
+        # 1순위: WM_IME_CONTROL 메시지로 직접 설정
         try:
-            # keybd_event로 VK_HANGUL 키 전송
-            self.user32.keybd_event(self.VK_HANGUL, 0, 0, 0)          # Key down
-            time.sleep(0.01)
-            self.user32.keybd_event(self.VK_HANGUL, 0, 0x0002, 0)    # Key up
-            time.sleep(0.15)  # IME 전환 대기 (OS 처리 시간 확보)
+            ime_hwnd = self._get_ime_hwnd()
+            if ime_hwnd:
+                current = self.user32.SendMessageW(
+                    ime_hwnd, self.WM_IME_CONTROL, self.IMC_GETCONVERSIONMODE, 0)
+                if enable:
+                    new_mode = current | self.IME_CMODE_HANGEUL
+                else:
+                    new_mode = current & ~self.IME_CMODE_HANGEUL
+                self.user32.SendMessageW(
+                    ime_hwnd, self.WM_IME_CONTROL, self.IMC_SETCONVERSIONMODE, new_mode)
+                time.sleep(0.03)
+                if self.is_hangul_mode() == enable:
+                    return
         except Exception:
             pass
+
+        # 2순위: VK_HANGUL 키 시뮬레이션 (폴백)
+        for _ in range(3):
+            try:
+                self.user32.keybd_event(self.VK_HANGUL, 0, 0, 0)
+                time.sleep(0.01)
+                self.user32.keybd_event(self.VK_HANGUL, 0, 0x0002, 0)
+                time.sleep(0.12)
+            except Exception:
+                pass
+            if self.is_hangul_mode() == enable:
+                return
 
     def ensure_english_mode(self):
         """영문 모드로 전환 (이미 영문이면 아무것도 안 함)"""
@@ -370,10 +436,25 @@ class TypingEngine:
         pyautogui.hotkey('ctrl', 'v')
         time.sleep(0.02)  # 클립보드 붙여넣기 처리 대기
 
+    def _commit_ime_composition(self):
+        """현재 IME 조합 중인 글자를 확정(commit)하여 버퍼 비움.
+        한글 자모 입력 후 SendInput 유니코드로 전환하기 전에 반드시 호출.
+        Right 키를 누르면 조합이 확정되고 커서가 글자 뒤(올바른 위치)로 이동함."""
+        if pyautogui:
+            pyautogui.press('right')
+            time.sleep(0.02)
+
+    def _send_unicode(self, char):
+        """SendInput KEYEVENTF_UNICODE로 문자 직접 전송 (IME 우회)"""
+        if IS_WINDOWS:
+            send_unicode_char(char)
+        elif pyperclip and pyautogui:
+            self._type_via_clipboard(char)
+
     def _type_text_typing_mode(self, text):
-        """타이핑 모드: 한글은 자모 분해, 영어는 한/영 전환 후 직접 입력"""
+        """타이핑 모드: 한글은 자모 분해, 영문/기호는 SendInput 유니코드 (IME 전환 불필요)"""
         total = len(text)
-        in_hangul = None  # 현재 모드 추적
+        in_hangul = None
 
         for i, char in enumerate(text):
             if self.is_stopped():
@@ -381,44 +462,36 @@ class TypingEngine:
             if not self._check_focus():
                 break
 
-            # 이어쓰기: 이미 입력된 부분 건너뛰기
             if i < self._start_index:
                 self._update_progress(i + 1, total)
                 continue
 
             if char in ('\n', '\r'):
-                pyautogui.press('enter')
+                if in_hangul is True:
+                    self._commit_ime_composition()
+                pyautogui.press('enter') if pyautogui else None
             elif char == '\t':
-                pyautogui.press('tab')
+                if in_hangul is True:
+                    self._commit_ime_composition()
+                pyautogui.press('tab') if pyautogui else None
             elif is_hangul(char) or is_hangul_jamo(char):
-                # 한글 구간 — 매 글자마다 IME 상태 확인
-                if in_hangul is not True:
+                # 한글 → IME 한글 모드에서 자모 분해 타이핑
+                if in_hangul is not True or not self.ime.is_hangul_mode():
                     self.ime.ensure_hangul_mode()
                     in_hangul = True
-                    time.sleep(0.1)
-                elif not self.ime.is_hangul_mode():
-                    self.ime.ensure_hangul_mode()
-                    time.sleep(0.05)
+                    time.sleep(0.03)
                 if is_hangul(char):
                     self._type_hangul_char(char)
                 else:
-                    # 단독 자모
                     keys = jamo_to_keys(char)
                     for key in keys:
                         self._press_key(key)
-            elif is_ascii_printable(char):
-                # 영어/숫자/기호 구간 — 매 글자마다 IME 상태 확인
-                if in_hangul is not False:
-                    self.ime.ensure_english_mode()
-                    in_hangul = False
-                    time.sleep(0.1)
-                elif self.ime.is_hangul_mode():
-                    self.ime.ensure_english_mode()
-                    time.sleep(0.05)
-                self._type_ascii_char(char)
             else:
-                # 기타 유니코드 문자 → 클립보드로 처리
-                self._type_via_clipboard(char)
+                # 영문/숫자/기호/기타 → SendInput 유니코드로 직접 전송
+                if in_hangul is True:
+                    self._commit_ime_composition()  # 한글 조합 확정 후 전환
+                    in_hangul = False
+                self._send_unicode(char)
 
             self._last_index = i + 1
             self._update_progress(i + 1, total)
@@ -453,7 +526,7 @@ class TypingEngine:
                 time.sleep(self.delay)
 
     def _type_text_hybrid_mode(self, text):
-        """하이브리드 모드: 한글은 자모 분해 타이핑, 영어/기타는 클립보드"""
+        """하이브리드 모드: 한글은 자모 분해 타이핑, 영어/기타는 SendInput 유니코드"""
         total = len(text)
         in_hangul = None
 
@@ -463,24 +536,24 @@ class TypingEngine:
             if not self._check_focus():
                 break
 
-            # 이어쓰기: 이미 입력된 부분 건너뛰기
             if i < self._start_index:
                 self._update_progress(i + 1, total)
                 continue
 
             if char in ('\n', '\r'):
+                if in_hangul is True:
+                    self._commit_ime_composition()
                 pyautogui.press('enter') if pyautogui else None
             elif char == '\t':
+                if in_hangul is True:
+                    self._commit_ime_composition()
                 pyautogui.press('tab') if pyautogui else None
             elif is_hangul(char) or is_hangul_jamo(char):
-                # 한글 → 자모 분해 타이핑 — 매 글자마다 IME 상태 확인
-                if in_hangul is not True:
+                # 한글 → 자모 분해 타이핑
+                if in_hangul is not True or not self.ime.is_hangul_mode():
                     self.ime.ensure_hangul_mode()
                     in_hangul = True
-                    time.sleep(0.1)
-                elif not self.ime.is_hangul_mode():
-                    self.ime.ensure_hangul_mode()
-                    time.sleep(0.05)
+                    time.sleep(0.03)
                 if is_hangul(char):
                     self._type_hangul_char(char)
                 else:
@@ -488,11 +561,11 @@ class TypingEngine:
                     for key in keys:
                         self._press_key(key)
             else:
-                # 영어/기타 → 클립보드로 처리 (IME 상태 무관)
-                if in_hangul is not False:
-                    # 한글 모드에서 나갈 때 한/영 전환 없이 클립보드 사용
+                # 영어/기타 → SendInput 유니코드 (IME 전환 불필요)
+                if in_hangul is True:
+                    self._commit_ime_composition()  # 한글 조합 확정 후 전환
                     in_hangul = False
-                self._type_via_clipboard(char)
+                self._send_unicode(char)
 
             self._last_index = i + 1
             self._update_progress(i + 1, total)
@@ -558,7 +631,7 @@ class HmAutotyperApp:
             self.root = ctk.CTk()
         else:
             self.root = tk.Tk()
-        self.root.title("HM AutoTyper v3.0  \u00a9 2026 haemin")
+        self.root.title("HM AutoTyper v3.1  \u00a9 2026 haemin")
         self.root.geometry("1160x960")
         self.root.minsize(960, 700)
         self.root.resizable(True, True)
@@ -728,25 +801,19 @@ class HmAutotyperApp:
         resume_label.pack(side="left")
         resume_label.bind("<Button-1>", _toggle_resume)
 
-        # --- 진행률 ---
-        progress_frame = tk.Frame(self.root)
-        progress_frame.pack(**pad, fill="x")
+        # --- 하단 영역 (side="bottom"으로 먼저 배치하여 항상 표시) ---
 
+        # 상태 라벨 (맨 아래)
         if USE_CTK:
-            self.progress_bar = ctk.CTkProgressBar(progress_frame, width=800)
-            self.progress_bar.pack(fill="x", padx=4, pady=2)
-            self.progress_bar.set(0)
+            self.status_label = ctk.CTkLabel(self.root, text="",
+                                             font=ctk.CTkFont(size=11), text_color="gray")
         else:
-            import tkinter.ttk as ttk
-            self.progress_bar = ttk.Progressbar(progress_frame, length=800, mode='determinate')
-            self.progress_bar.pack(fill="x", padx=4, pady=2)
+            self.status_label = tk.Label(self.root, text="", font=("맑은 고딕", 9), fg="gray")
+        self.status_label.pack(side="bottom", pady=(0, 8))
 
-        self.progress_label = tk.Label(self.root, text="대기 중", font=("맑은 고딕", 10))
-        self.progress_label.pack(pady=2)
-
-        # --- 버튼 ---
+        # 버튼
         btn_frame = tk.Frame(self.root)
-        btn_frame.pack(pady=8)
+        btn_frame.pack(side="bottom", pady=8)
 
         if USE_CTK:
             self.start_btn = ctk.CTkButton(btn_frame, text="시작 (F6)", width=140,
@@ -795,13 +862,22 @@ class HmAutotyperApp:
                                         font=("맑은 고딕", 11, "bold"), bg="#7f8c8d", fg="white")
             self.reset_btn.pack(side="left", padx=6)
 
-        # --- 상태 라벨 ---
+        # 진행률 라벨
+        self.progress_label = tk.Label(self.root, text="대기 중", font=("맑은 고딕", 10))
+        self.progress_label.pack(side="bottom", pady=2)
+
+        # 진행률 바
+        progress_frame = tk.Frame(self.root)
+        progress_frame.pack(side="bottom", **pad, fill="x")
+
         if USE_CTK:
-            self.status_label = ctk.CTkLabel(self.root, text="",
-                                             font=ctk.CTkFont(size=11), text_color="gray")
+            self.progress_bar = ctk.CTkProgressBar(progress_frame, width=800)
+            self.progress_bar.pack(fill="x", padx=4, pady=2)
+            self.progress_bar.set(0)
         else:
-            self.status_label = tk.Label(self.root, text="", font=("맑은 고딕", 9), fg="gray")
-        self.status_label.pack(pady=(0, 8))
+            import tkinter.ttk as ttk
+            self.progress_bar = ttk.Progressbar(progress_frame, length=800, mode='determinate')
+            self.progress_bar.pack(fill="x", padx=4, pady=2)
 
     # ── 핫키 등록 ──
     def _register_hotkeys(self):
@@ -1982,8 +2058,8 @@ class HmAutotyperApp:
         # 제목 영역
         title_frame = tk.Frame(popup)
         title_frame.pack(fill="x", padx=40, pady=(30, 8))
-        tk.Label(title_frame, text="HM AutoTyper v3.0", font=("Arial", 24, "bold")).pack()
-        tk.Label(title_frame, text="한/영 자동 전환 · 이어쓰기 · 검증 · 클립보드/타이핑 수정 · 붙여넣기 차단 우회",
+        tk.Label(title_frame, text="HM AutoTyper v3.1", font=("Arial", 24, "bold")).pack()
+        tk.Label(title_frame, text="SendInput 유니코드 · 한/영 자동 전환 · 이어쓰기 · 검증 · 붙여넣기 차단 우회",
                  font=("맑은 고딕", 12), fg="gray").pack(pady=(4, 0))
         tk.Label(title_frame, text="\u00a9 2026 haemin. All rights reserved. 무단 배포 및 판매 금지.",
                  font=("맑은 고딕", 10), fg="#e74c3c").pack(pady=(6, 0))
@@ -2065,16 +2141,16 @@ class HmAutotyperApp:
         info_widget.insert("end", "2. 타이핑 모드 안내\n", "section")
 
         info_widget.insert("end", "  \u2b50  하이브리드 (추천)\n", "mode_title")
-        info_widget.insert("end", "한글은 초성\u2192중성\u2192종성 자모 분해로 실제 타이핑하는 것처럼 입력하고, 영어/숫자/기호는 클립보드(Ctrl+V)로 안정적으로 입력합니다. 매 글자마다 IME 상태를 실시간 확인하며, 한/영 전환 오류가 가장 적어 대부분의 상황에서 권장됩니다.\n\n", "desc")
+        info_widget.insert("end", "한글은 자모 분해로 실제 타이핑하는 것처럼 입력하고, 영어/숫자/기호는 SendInput 유니코드로 직접 입력합니다. 클립보드를 사용하지 않으며, 한/영 IME 전환도 불필요합니다. 대부분의 상황에서 권장됩니다.\n\n", "desc")
 
-        info_widget.insert("end", "  \u2328  타이핑 (한/영 자동전환)\n", "mode_title")
-        info_widget.insert("end", "모든 글자를 키보드 시뮬레이션으로 입력합니다. 한글 구간에서는 자동으로 한글 모드로, 영문 구간에서는 영문 모드로 IME를 전환합니다. 매 글자마다 IME 상태를 실시간 확인하여, 외부 요인으로 한/영 상태가 어긋나면 즉시 재전환합니다.\n\n", "desc")
+        info_widget.insert("end", "  \u2328  타이핑\n", "mode_title")
+        info_widget.insert("end", "한글은 자모 분해 키보드 시뮬레이션으로, 영문/숫자/기호는 SendInput 유니코드로 입력합니다. 한/영 IME 전환 없이 영문을 OS에 직접 유니코드로 전달하므로 한/영 전환 오류가 발생하지 않습니다. 클립보드를 사용하지 않아 붙여넣기 차단 환경에서도 작동합니다.\n\n", "desc")
 
         info_widget.insert("end", "  \U0001f4cb  클립보드 (가장 안정)\n", "mode_title")
         info_widget.insert("end", "모든 글자를 한 글자씩 클립보드에 복사 후 Ctrl+V로 붙여넣기합니다. 타이핑 효과는 없지만 오타가 거의 발생하지 않아 정확성이 가장 중요할 때 사용합니다.\n\n", "desc")
 
-        info_widget.insert("end", "  \u2714  글자별 IME 실시간 검사 (타이핑/하이브리드 공통)\n", "mode_title")
-        info_widget.insert("end", "타이핑 모드와 하이브리드 모드에서는 한 글자를 입력하기 전에 매번 현재 IME 상태(한글/영문)가 올바른지 자동으로 확인합니다. 만약 외부 요인(사용자가 실수로 한/영 키를 누르는 등)으로 IME 상태가 어긋나 있으면, 해당 글자를 입력하기 전에 즉시 올바른 모드로 재전환합니다. 이 과정은 Windows API 호출 1회(약 0.5ms)로 처리되어 체감 속도에 영향이 없습니다.\n\n", "desc")
+        info_widget.insert("end", "  \u2714  v3.1 핵심 개선: SendInput 유니코드 입력\n", "mode_title")
+        info_widget.insert("end", "v3.0까지는 영문 입력 시 IME를 영문 모드로 전환해야 했는데, 이 전환이 불안정하여 한글 자모가 깨지는 문제가 있었습니다. v3.1에서는 영문/숫자/특수문자를 Windows SendInput API의 KEYEVENTF_UNICODE 플래그로 직접 전송합니다. 이 방식은 IME를 완전히 우회하여 한글 모드 상태에서도 영문이 정확히 입력됩니다. 한\u2192영 전환 자체가 사라졌기 때문에 전환 실패가 원천 불가능합니다.\n\n", "desc")
 
         info_widget.insert("end", "\ud83d\udca1 어떤 모드를 선택할지 모르겠다면 하이브리드(기본값)를 사용하세요.\n\n", "tip")
 
@@ -2180,8 +2256,7 @@ class HmAutotyperApp:
         info_widget.insert("end", "  10ms 이하     환경에 따라 오타 발생 가능\n\n", "hotkey")
 
         info_widget.insert("end", "  모드별 오타 특성\n", "subsection")
-        info_widget.insert("end", "  \u2022  타이핑 모드 \u2014 매 글자마다 IME 상태를 확인하여 자동 복구하지만, 딜레이가 극단적으로 짧으면 OS 처리 지연으로 오타가 발생할 수 있습니다.\n", "feature")
-        info_widget.insert("end", "  \u2022  하이브리드 모드 \u2014 자모 분해 입력 시 딜레이가 너무 짧으면 OS 입력 버퍼가 밀려 글자가 깨질 수 있습니다.\n", "feature")
+        info_widget.insert("end", "  \u2022  타이핑/하이브리드 모드 \u2014 한글 자모 분해 시 딜레이가 너무 짧으면 OS 입력 버퍼가 밀려 글자가 깨질 수 있습니다. 영문은 SendInput 유니코드로 처리되어 오타가 거의 없습니다.\n", "feature")
         info_widget.insert("end", "  \u2022  클립보드 모드 \u2014 붙여넣기 방식이므로 딜레이와 오타는 거의 무관합니다.\n\n", "feature")
 
         info_widget.insert("end", "\ud83d\udca1 오타가 발생하면 딜레이를 50ms 이상으로 올리거나, 검증(F7) 후 자동 수정을 활용하세요.\n\n", "tip")
@@ -2193,7 +2268,8 @@ class HmAutotyperApp:
         # 8. 주요 기능 목록
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         info_widget.insert("end", "8. 주요 기능 목록\n", "section")
-        info_widget.insert("end", "  \u2022  한/영 자동 전환 \u2014 텍스트의 한글/영문 구간을 감지하여 IME를 자동 전환, 매 글자마다 실시간 상태 확인\n", "feature")
+        info_widget.insert("end", "  \u2022  SendInput 유니코드 입력 \u2014 영문/숫자/기호를 IME 우회하여 직접 전송, 한/영 전환 오류 원천 차단\n", "feature")
+        info_widget.insert("end", "  \u2022  한글 자모 분해 타이핑 \u2014 한글 구간에서 IME 한글 모드 자동 전환, 매 글자마다 상태 확인\n", "feature")
         info_widget.insert("end", "  \u2022  3가지 타이핑 모드 \u2014 상황에 맞게 타이핑 / 클립보드 / 하이브리드 선택\n", "feature")
         info_widget.insert("end", "  \u2022  딜레이 조절 \u2014 글자 간 입력 속도를 0~500ms로 자유롭게 설정\n", "feature")
         info_widget.insert("end", "  \u2022  포커스 가드 \u2014 다른 창을 클릭하면 타이핑 자동 중지 (안전장치)\n", "feature")
@@ -2213,12 +2289,12 @@ class HmAutotyperApp:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # 9. 비교표 (원본 vs HM)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        info_widget.insert("end", "9. 원본(autotyper.exe) vs HM AutoTyper 비교\n", "section")
+        info_widget.insert("end", "9. 원본(autotyper.exe) vs HM AutoTyper v3.1 비교\n", "section")
 
         # 테이블 데이터
         table_data = [
             ("타이핑 모드",      "1가지 (자모 분해만)",                    "3가지 (타이핑/클립보드/하이브리드)"),
-            ("한/영 전환",       "수동 (사용자가 직접 설정)",              "자동 (매 글자 IME 실시간 확인)"),
+            ("한/영 전환",       "수동 (사용자가 직접 설정)",              "SendInput 유니코드 (전환 불필요)"),
             ("핫키",             "없음 (버튼 클릭만)",                     "F6 시작 / F7 검증 / ESC 정지"),
             ("시작 방식",        "바로 시작",                              "3초 카운트다운 후 시작"),
             ("진행률 표시",      "없음",                                   "프로그레스 바 + 글자 수 표시"),
@@ -2228,7 +2304,7 @@ class HmAutotyperApp:
             ("오류 수정",        "없음",                                   "클립보드 방식 + 타이핑 방식 4가지"),
             ("초기화",           "없음",                                   "진행 상태 리셋 후 처음부터 시작"),
             ("이어쓰기",         "없음",                                   "중단 지점부터 이어서 입력"),
-            ("영문/특수문자",    "단순 write()",                           "대소문자 Shift + 특수문자 매핑"),
+            ("영문/특수문자",    "단순 write()",                           "SendInput 유니코드 직접 전송"),
             ("복합 모음/종성",   "기본적",                                 "ㅘ,ㅙ,ㅚ / ㄳ,ㄵ 등 완전 지원"),
             ("UI 크기",          "400\u00d7480 (고정)",                    "1160\u00d7960 (리사이즈 가능)"),
             ("다크모드",         "없음",                                   "customtkinter 지원 시 가능"),
